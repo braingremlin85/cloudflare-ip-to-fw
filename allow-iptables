@@ -1,0 +1,82 @@
+#!/bin/bash
+
+# Define an array of ports
+PORTS=(80 443 8080)  # Add any other ports you want to include
+
+ipfile=ipv4.txt
+
+# Check for --dry-run argument
+dry_run=false
+for arg in "$@"; do
+    if [[ "$arg" == "--dry-run" ]]; then
+        dry_run=true
+        break
+    fi
+done
+
+# Download the IPs from Cloudflare
+wget https://www.cloudflare.com/ips-v4/ -O $ipfile
+
+if [[ ! -f $ipfile ]]; then
+    echo "Il file $ipfile non esiste."
+    exit 1
+fi
+
+# put generation date/time to ipfile
+sed -i "1 i\#Generated $(date)" $ipfile
+
+# Block all other traffic
+for port in "${PORTS[@]}"; do
+    if [ "$dry_run" = false ]; then
+        sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport "$port" -j DROP
+    else
+    echo "Dry run: sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport $port -j DROP"
+    fi
+done
+
+
+while IFS= read -r ip; do
+    for port in "${PORTS[@]}"; do
+        if [ "$dry_run" = false ]; then
+            sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport "$port" --ctorigsrc "$ip" -j ACCEPT
+            echo "Regola aggiunta per l'IP: $ip sulla porta: $port"
+        else
+            echo "Dry run: sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport $port --ctorigsrc $ip -j ACCEPT"
+        fi
+    done
+done < $ipfile
+
+
+if [ "$dry_run" = true ]; then
+    exit 0
+fi
+# other fw rules
+
+# estabilished
+sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# loopback
+sudo iptables -A INPUT -i lo -j ACCEPT
+sudo iptables -A OUTPUT -o lo -j ACCEPT
+
+# limit ssh
+sudo iptables -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --set
+sudo iptables -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
+sudo iptables -A INPUT -p tcp --dport 22 -m state --state NEW,ESTABLISHED -j ACCEPT
+
+# drop ping
+#sudo iptables -A INPUT -p icmp -j DROP
+
+#default
+sudo iptables -P OUTPUT ACCEPT
+sudo iptables -P INPUT DROP
+sudo iptables -P FORWARD DROP
+
+
+sudo iptables -A INPUT -p tcp -m multiport --dports 80,443 -j DROP
+
+sudo iptables -A INPUT -i lo -j ACCEPT
+sudo iptables -A OUTPUT -o lo -j ACCEPT
+
+sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+

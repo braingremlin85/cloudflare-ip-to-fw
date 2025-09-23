@@ -1,0 +1,49 @@
+#!/bin/bash
+
+# Define an array of ports
+PORTS=(80 443 8080)  # Add any other ports you want to include
+ipfile=ipv4.txt
+
+# Check for --dry-run argument
+dry_run=false
+for arg in "$@"; do
+    if [[ "$arg" == "--dry-run" ]]; then
+        dry_run=true
+        break
+    fi
+done
+
+# Scarica l'elenco degli IP di Cloudflare
+wget https://www.cloudflare.com/ips-v4 -O $ipfile
+
+if [[ ! -f $ipfile ]]; then
+    echo "Il file $ipfile non esiste."
+    exit 1
+fi
+
+# put generation date/time to ipfile
+sed -i "1 i\#Generated $(date)" $ipfile
+
+# Abilita UFW se non è già abilitato
+sudo ufw enable
+
+while IFS= read -r ip; do
+    for port in "${PORTS[@]}"; do
+        if [ "$dry_run" = false ]; then
+            sudo ufw route allow proto tcp from "$ip" to any port "$port"
+            echo "Regola aggiunta per l'IP: $ip sulla porta: $port"
+        else
+            echo "Dry run: sudo ufw route allow proto tcp from "$ip" to any port "$port""
+        fi
+    done
+done < $ipfile
+
+
+# Blocca tutto il resto sulle porte 80 e 443
+for port in "${PORTS[@]}"; do
+    if [ "$dry_run" = false ]; then
+        sudo ufw deny $port/tcp
+    else
+        echo "Dry run: sudo ufw deny $port/tcp"
+    fi
+done
