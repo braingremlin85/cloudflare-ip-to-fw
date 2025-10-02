@@ -29,14 +29,13 @@ sed -i "1 i\#Generated $(date)" $ipfile
 for port in "${PORTS[@]}"; do
     if [ "$dry_run" = false ]; then
         sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport "$port" -j DROP
-        echo "test"
     else
     echo "Dry run: sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport $port -j DROP"
     fi
 done
 
 
-tail -n +2 ipv4.txt | while IFS= read -r ip; do
+tail -n +2 $ipfile | while IFS= read -r ip; do
     for port in "${PORTS[@]}"; do
         if [ "$dry_run" = false ]; then
             sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport "$port" --ctorigsrc "$ip" -j ACCEPT
@@ -45,7 +44,7 @@ tail -n +2 ipv4.txt | while IFS= read -r ip; do
             echo "Dry run: sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport $port --ctorigsrc $ip -j ACCEPT"
         fi
     done
-done < $ipfile
+done
 
 
 if [ "$dry_run" = true ]; then
