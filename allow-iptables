@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Define an array of ports
-PORTS=(80 443 8080)  # Add any other ports you want to include
+PORTS=(80 443 8080 8880)  # Add any other ports you want to include
 
-ipfile=ipv4.txt
+ipfile=cloudflare.ip4
 
 # Check for --dry-run argument
 dry_run=false
@@ -29,13 +29,14 @@ sed -i "1 i\#Generated $(date)" $ipfile
 for port in "${PORTS[@]}"; do
     if [ "$dry_run" = false ]; then
         sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport "$port" -j DROP
+        echo "test"
     else
     echo "Dry run: sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport $port -j DROP"
     fi
 done
 
 
-while IFS= read -r ip; do
+tail -n +2 ipv4.txt | while IFS= read -r ip; do
     for port in "${PORTS[@]}"; do
         if [ "$dry_run" = false ]; then
             sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport "$port" --ctorigsrc "$ip" -j ACCEPT
@@ -55,11 +56,11 @@ fi
 # estabilished
 sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-# loopback
+# loopback: accept localhost
 sudo iptables -A INPUT -i lo -j ACCEPT
 sudo iptables -A OUTPUT -o lo -j ACCEPT
 
-# limit ssh
+# enable but limit ssh
 sudo iptables -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --set
 sudo iptables -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
 sudo iptables -A INPUT -p tcp --dport 22 -m state --state NEW,ESTABLISHED -j ACCEPT
@@ -71,12 +72,3 @@ sudo iptables -A INPUT -p tcp --dport 22 -m state --state NEW,ESTABLISHED -j ACC
 sudo iptables -P OUTPUT ACCEPT
 sudo iptables -P INPUT DROP
 sudo iptables -P FORWARD DROP
-
-
-sudo iptables -A INPUT -p tcp -m multiport --dports 80,443 -j DROP
-
-sudo iptables -A INPUT -i lo -j ACCEPT
-sudo iptables -A OUTPUT -o lo -j ACCEPT
-
-sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-
