@@ -1,9 +1,14 @@
 #!/bin/bash
+set -euo pipefail
 
 # Define an array of ports
-PORTS=(80 443 8080 8880)  # Add any other ports you want to include
-
+PORTS=(80 443 8080 81 666 8880)
 ipfile=cloudflare.ip4
+
+# WAN-facing interface (traffic entering here = real internet inbound,
+# NOT container-originated outbound traffic on the docker bridges)
+#WAN_IF="enp0s6" #hardcoded
+WAN_IF=$(ip route show default | awk '{print $5; exit}') #auto
 
 # Check for --dry-run argument
 dry_run=false
@@ -14,61 +19,82 @@ for arg in "$@"; do
     fi
 done
 
+# Helper: add rule to INPUT/OUTPUT only if not already present (idempotent, no flush needed)
+add_rule() {
+    if ! sudo iptables -C "$@" 2>/dev/null; then
+        sudo iptables -A "$@"
+    fi
+}
+
 # Download the IPs from Cloudflare
 wget https://www.cloudflare.com/ips-v4/ -O $ipfile
-
 if [[ ! -f $ipfile ]]; then
     echo "Il file $ipfile non esiste."
     exit 1
 fi
 
 # put generation date/time to ipfile
-sed -i "1 i\#Generated $(date)" $ipfile
+sed -i "1 i\\#Generated $(date)" $ipfile
 
-# Block all other traffic
-for port in "${PORTS[@]}"; do
-    if [ "$dry_run" = false ]; then
-        # sudo iptables -I DOCKER-USER -p tcp -j DROP # to block EVERYTHING! use with caution
-        sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport "$port" -j DROP
-    else
-    echo "Dry run: sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport $port -j DROP"
-    fi
-done
+if [ "$dry_run" = false ]; then
+    # DOCKER-USER is safe to fully flush and rebuild every run:
+    # it holds only rules this script owns, so flushing avoids
+    # accumulating duplicates and correctly drops stale Cloudflare
+    # IPs that have rotated out of the current list.
+    sudo iptables -F DOCKER-USER
 
+    # accept traffic form inside the containers to internet, wich would be blocked by other rules
+    sudo iptables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+else
+    echo "Dry run: sudo iptables -A DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+fi
 
+# Add ACCEPT rules for whitelisted IPs FIRST (must precede the DROP rules below)
 tail -n +2 $ipfile | while IFS= read -r ip; do
+    [[ -z "$ip" ]] && continue
     for port in "${PORTS[@]}"; do
         if [ "$dry_run" = false ]; then
-            sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport "$port" --ctorigsrc "$ip" -j ACCEPT
+            sudo iptables -A DOCKER-USER -i "$WAN_IF" -p tcp -m conntrack --ctorigdstport "$port" --ctorigsrc "$ip" -j ACCEPT
             echo "Regola aggiunta per l'IP: $ip sulla porta: $port"
         else
-            echo "Dry run: sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport $port --ctorigsrc $ip -j ACCEPT"
+            echo "Dry run: sudo iptables -A DOCKER-USER -i $WAN_IF -p tcp -m conntrack --ctorigdstport $port --ctorigsrc $ip -j ACCEPT"
         fi
     done
 done
 
+# Block all other inbound traffic on these ports SECOND
+# (-i $WAN_IF ensures this only matches traffic arriving from the
+# internet, not container-originated outbound traffic on the same ports)
+for port in "${PORTS[@]}"; do
+    if [ "$dry_run" = false ]; then
+        sudo iptables -A DOCKER-USER -i "$WAN_IF" -p tcp -m conntrack --ctorigdstport "$port" -j DROP
+    else
+        echo "Dry run: sudo iptables -A DOCKER-USER -i $WAN_IF -p tcp -m conntrack --ctorigdstport $port -j DROP"
+    fi
+done
 
 if [ "$dry_run" = true ]; then
     exit 0
 fi
-# other fw rules
 
-# estabilished
-sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+# Other fw rules (idempotent: only added if not already present)
+
+# established
+add_rule INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
 # loopback: accept localhost
-sudo iptables -A INPUT -i lo -j ACCEPT
-sudo iptables -A OUTPUT -o lo -j ACCEPT
+add_rule INPUT -i lo -j ACCEPT
+add_rule OUTPUT -o lo -j ACCEPT
 
 # enable but limit ssh !!! Pay attention, check the readme !!!
-sudo iptables -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --set
-sudo iptables -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
-sudo iptables -A INPUT -p tcp --dport 22 -m state --state NEW,ESTABLISHED -j ACCEPT
+add_rule INPUT -p tcp --dport 22 -m state --state NEW -m recent --set
+add_rule INPUT -p tcp --dport 22 -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
+add_rule INPUT -p tcp --dport 22 -m state --state NEW,ESTABLISHED -j ACCEPT
 
 # drop ping
-#sudo iptables -A INPUT -p icmp -j DROP
+#add_rule INPUT -p icmp -j DROP
 
-#default
+# default policies
 sudo iptables -P OUTPUT ACCEPT
 sudo iptables -P INPUT DROP
 sudo iptables -P FORWARD DROP
